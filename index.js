@@ -7,7 +7,7 @@ const {
   entersState,
   VoiceConnectionStatus
 } = require('@discordjs/voice');
-const play = require('play-dl');
+const ytdl = require('ytdl-core');
 
 const client = new Client({
   intents: [
@@ -32,8 +32,8 @@ client.once('ready', () => {
   console.log(`Bot nyala: ${client.user.tag}`);
 });
 
-// 🔥 CONNECT FUNCTION (ANTI BUG)
-async function connectToChannel(vc) {
+// CONNECT
+async function connect(vc) {
   connection = joinVoiceChannel({
     channelId: vc.id,
     guildId: vc.guild.id,
@@ -41,43 +41,34 @@ async function connectToChannel(vc) {
     selfDeaf: true,
   });
 
-  try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 20000);
-    connection.subscribe(player);
-    console.log('Voice ready 🔊');
-  } catch (error) {
-    console.log('Gagal connect:', error);
-    connection.destroy();
-  }
+  await entersState(connection, VoiceConnectionStatus.Ready, 20000);
+  connection.subscribe(player);
 }
 
-// 🎵 PLAY FUNCTION
+// PLAY
 async function playMusic(url) {
   try {
     isPlaying = true;
 
-    const stream = await play.stream(url);
-
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
-      inlineVolume: true,
+    const stream = ytdl(url, {
+      filter: 'audioonly',
+      quality: 'highestaudio'
     });
 
-    resource.volume.setVolume(0.5);
+    const resource = createAudioResource(stream);
 
     player.play(resource);
 
   } catch (err) {
-    console.log('Play error:', err);
+    console.log(err);
     isPlaying = false;
   }
 }
 
-// 🔁 LOOP
+// LOOP
 player.on(AudioPlayerStatus.Idle, async () => {
   if (queue.length > 0) {
-    const next = queue.shift();
-    await playMusic(next);
+    await playMusic(queue.shift());
   } else if (mode247) {
     await playMusic(DEFAULT_URL);
   } else {
@@ -96,75 +87,49 @@ client.on('messageCreate', async (message) => {
 
   // JOIN
   if (command === 'join') {
-    if (!vc) return message.reply('Masuk voice dulu bre');
-    await connectToChannel(vc);
-    return message.reply('Masuk voice 😎');
+    if (!vc) return message.reply('Masuk voice dulu');
+    await connect(vc);
+    return message.reply('Join voice');
   }
 
-  // PLAY
+  // PLAY (YT ONLY FIX)
   if (command === 'play') {
-    const query = args.join(' ');
-    if (!query) return message.reply('Masukin judul / link bre');
-    if (!vc) return message.reply('Masuk voice dulu bre');
+    const url = args[0];
+    if (!url) return message.reply('Masukin link YouTube');
 
-    if (!connection) {
-      await connectToChannel(vc);
+    if (!ytdl.validateURL(url)) {
+      return message.reply('Link harus YouTube dulu bre (sementara)');
     }
 
-    let url;
+    if (!connection) await connect(vc);
 
-    try {
-      if (play.is_spotify_url(query)) {
-        const spData = await play.spotify(query);
-        const yt = await play.search(`${spData.name} ${spData.artists[0].name}`, { limit: 1 });
-        url = yt[0].url;
-      } else {
-        if (play.yt_validate(query) === 'video') {
-          url = query;
-        } else {
-          const yt = await play.search(query, { limit: 1 });
-          url = yt[0].url;
-        }
-      }
-
-      if (isPlaying) {
-        queue.push(url);
-        return message.reply('Ditambah ke queue 🎶');
-      }
-
-      await playMusic(url);
-      return message.reply('Gas muter lagu 🔊');
-
-    } catch (err) {
-      console.log(err);
-      return message.reply('Error play ❌');
+    if (isPlaying) {
+      queue.push(url);
+      return message.reply('Masuk queue');
     }
+
+    await playMusic(url);
+    return message.reply('Play 🔊');
   }
 
   // 24/7
   if (command === '247') {
-    if (!vc) return message.reply('Masuk voice dulu bre');
+    if (!vc) return message.reply('Masuk voice dulu');
 
     mode247 = !mode247;
 
     if (mode247) {
-      if (!connection) {
-        await connectToChannel(vc);
-      }
-
-      if (!isPlaying) {
-        await playMusic(DEFAULT_URL);
-      }
-
-      return message.reply('Mode 24/7 ON 🔥');
+      if (!connection) await connect(vc);
+      if (!isPlaying) await playMusic(DEFAULT_URL);
+      return message.reply('24/7 ON 🔥');
     } else {
-      return message.reply('Mode 24/7 OFF ❌');
+      return message.reply('24/7 OFF');
     }
   }
 
   // LEAVE
   if (command === 'leave') {
-    if (!connection) return message.reply('Bot ga lagi di voice');
+    if (!connection) return message.reply('Ga di voice');
 
     connection.destroy();
     connection = null;
@@ -172,9 +137,8 @@ client.on('messageCreate', async (message) => {
     isPlaying = false;
     mode247 = false;
 
-    return message.reply('Cabut 👋');
+    return message.reply('Leave 👋');
   }
 });
 
-// LOGIN
 client.login(process.env.TOKEN);
