@@ -23,14 +23,14 @@ let isPlaying = false;
 let mode247 = false;
 
 const PREFIX = 'k!';
-const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk"; // lofi
+const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk";
 
-// 🔥 BOT READY
+// 🔥 READY
 client.once('ready', () => {
   console.log(`Bot nyala: ${client.user.tag}`);
 });
 
-// 🔥 PLAY FUNCTION
+// 🎵 PLAY FUNCTION
 async function playMusic(url) {
   try {
     isPlaying = true;
@@ -42,12 +42,12 @@ async function playMusic(url) {
 
     player.play(resource);
   } catch (err) {
-    console.log('Error play:', err);
+    console.log(err);
     isPlaying = false;
   }
 }
 
-// 🔁 QUEUE & 24/7 SYSTEM
+// 🔁 QUEUE + 24/7
 player.on(AudioPlayerStatus.Idle, async () => {
   try {
     if (queue.length > 0) {
@@ -63,10 +63,9 @@ player.on(AudioPlayerStatus.Idle, async () => {
   }
 });
 
-// 🎮 PREFIX COMMAND SYSTEM
+// 🎮 COMMAND SYSTEM
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
-
   if (!message.content.startsWith(PREFIX)) return;
 
   const args = message.content.slice(PREFIX.length).trim().split(/ +/);
@@ -74,7 +73,7 @@ client.on('messageCreate', async (message) => {
 
   const vc = message.member.voice.channel;
 
-  // 🔊 JOIN
+  // JOIN
   if (command === 'join') {
     if (!vc) return message.reply('Masuk voice dulu bre');
 
@@ -89,7 +88,7 @@ client.on('messageCreate', async (message) => {
     return message.reply('Masuk voice 😎');
   }
 
-  // 🎵 PLAY
+  // PLAY
   if (command === 'play') {
     const query = args.join(' ');
     if (!query) return message.reply('Masukin judul / link bre');
@@ -107,7 +106,6 @@ client.on('messageCreate', async (message) => {
     let url;
 
     try {
-      // 🔥 SPOTIFY
       if (play.is_spotify_url(query)) {
         const spData = await play.spotify(query);
 
@@ -134,7 +132,6 @@ client.on('messageCreate', async (message) => {
         }
 
       } else {
-        // 🔥 YOUTUBE / SEARCH
         if (play.yt_validate(query) === 'video') {
           url = query;
         } else {
@@ -157,13 +154,13 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // ⏭️ SKIP
+  // SKIP
   if (command === 'skip') {
     player.stop();
     return message.reply('Skip ⏭️');
   }
 
-  // ⛔ STOP
+  // STOP
   if (command === 'stop') {
     queue = [];
     player.stop();
@@ -171,7 +168,7 @@ client.on('messageCreate', async (message) => {
     return message.reply('Stop semua ❌');
   }
 
-  // 🔁 24/7 MODE
+  // 24/7
   if (command === '247') {
     mode247 = !mode247;
 
@@ -181,25 +178,26 @@ client.on('messageCreate', async (message) => {
 
     return message.reply(`Mode 24/7: ${mode247 ? 'ON 🔥' : 'OFF ❌'}`);
   }
-  
-  // 🚪 LEAVE / DISCONNECT
-if (command === 'leave') {
-  if (!connection) return message.reply('Bot ga lagi di voice bre');
 
-  try {
-    connection.destroy();
-    connection = null;
+  // LEAVE
+  if (command === 'leave') {
+    if (!connection) return message.reply('Bot ga lagi di voice bre');
 
-    queue = [];
-    isPlaying = false;
-    mode247 = false;
+    try {
+      connection.destroy();
+      connection = null;
 
-    return message.reply('Cabut dari voice 👋');
-  } catch (err) {
-    console.log(err);
-    return message.reply('Error pas keluar voice ❌');
+      queue = [];
+      isPlaying = false;
+      mode247 = false;
+
+      return message.reply('Cabut dari voice 👋');
+    } catch (err) {
+      console.log(err);
+      return message.reply('Error pas keluar voice ❌');
+    }
   }
 });
 
-// 🔐 LOGIN (AMAN)
+// 🔐 LOGIN
 client.login(process.env.TOKEN);
