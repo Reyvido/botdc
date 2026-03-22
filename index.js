@@ -181,6 +181,24 @@ client.on('messageCreate', async (message) => {
 
     return message.reply(`Mode 24/7: ${mode247 ? 'ON 🔥' : 'OFF ❌'}`);
   }
+  
+  // 🚪 LEAVE / DISCONNECT
+if (command === 'leave') {
+  if (!connection) return message.reply('Bot ga lagi di voice bre');
+
+  try {
+    connection.destroy();
+    connection = null;
+
+    queue = [];
+    isPlaying = false;
+    mode247 = false;
+
+    return message.reply('Cabut dari voice 👋');
+  } catch (err) {
+    console.log(err);
+    return message.reply('Error pas keluar voice ❌');
+  }
 });
 
 // 🔐 LOGIN (AMAN)
