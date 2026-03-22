@@ -1,5 +1,5 @@
 {
-  "name": "discord-music-bot",
+  "name": "botdc",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
@@ -8,6 +8,7 @@
   "dependencies": {
     "discord.js": "^14.0.0",
     "@discordjs/voice": "^0.16.0",
-    "play-dl": "^1.9.0"
+    "play-dl": "^1.9.0",
+    "ffmpeg-static": "^5.2.0"
   }
 }
