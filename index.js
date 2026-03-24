@@ -1,4 +1,3 @@
-// Wajib load libsodium sebelum @discordjs/voice
 const sodium = require('libsodium-wrappers');
 
 const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
@@ -12,15 +11,15 @@ const {
   NoSubscriberBehavior,
 } = require('@discordjs/voice');
 const playdl = require('play-dl');
-const http = require('http'); // built-in, ga perlu install
+const http = require('http');
 
 // ─────────────────────────────────────────
-// HTTP SERVER — biar Railway ga sleep / restart bot
+// HTTP SERVER biar Railway ga sleep
 // ─────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('Bot lagi nyala!');
+  res.end('Bot nyala!');
 }).listen(PORT, () => {
   console.log(`HTTP server jalan di port ${PORT}`);
 });
@@ -36,9 +35,7 @@ const client = new Client({
 
 let connection;
 let player = createAudioPlayer({
-  behaviors: {
-    noSubscriber: NoSubscriberBehavior.Play,
-  }
+  behaviors: { noSubscriber: NoSubscriberBehavior.Play }
 });
 let queue = [];
 let currentSong = null;
@@ -51,7 +48,7 @@ const PREFIX = 'k!';
 const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk";
 
 // ─────────────────────────────────────────
-// HELPER: resolve input → info lagu
+// HELPER: resolve input
 // ─────────────────────────────────────────
 async function resolveInput(input) {
   const type = await playdl.validate(input);
@@ -128,32 +125,62 @@ function formatDuration(sec) {
 }
 
 // ─────────────────────────────────────────
-// CONNECT
+// CONNECT — timeout lebih panjang + retry
 // ─────────────────────────────────────────
-async function connect(vc) {
+async function connect(vc, retryCount = 0) {
   manualLeave = false;
   currentVC = vc;
 
-  connection = joinVoiceChannel({
-    channelId: vc.id,
-    guildId: vc.guild.id,
-    adapterCreator: vc.guild.voiceAdapterCreator,
-    selfDeaf: false,
-  });
-
-  await entersState(connection, VoiceConnectionStatus.Ready, 20000);
-  connection.subscribe(player);
-
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
-    if (manualLeave) return;
-    try {
-      await Promise.race([
-        entersState(connection, VoiceConnectionStatus.Signalling, 5000),
-        entersState(connection, VoiceConnectionStatus.Connecting, 5000),
-      ]);
-    } catch {
-      console.log('Disconnect — coba rejoin...');
+  try {
+    // Kalau ada koneksi lama, destroy dulu
+    if (connection) {
       try { connection.destroy(); } catch {}
+      connection = null;
+      await new Promise(r => setTimeout(r, 1000)); // tunggu bentar
+    }
+
+    connection = joinVoiceChannel({
+      channelId: vc.id,
+      guildId: vc.guild.id,
+      adapterCreator: vc.guild.voiceAdapterCreator,
+      selfDeaf: false,
+    });
+
+    // Timeout diperpanjang jadi 60 detik buat Railway
+    await entersState(connection, VoiceConnectionStatus.Ready, 60_000);
+    connection.subscribe(player);
+    console.log(`Connected ke VC: ${vc.name}`);
+
+    // ── Disconnect handler ──
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      if (manualLeave) return;
+      console.log('Disconnected dari VC, coba reconnect...');
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+        console.log('Reconnect berhasil');
+      } catch {
+        // Gagal reconnect otomatis, paksa rejoin
+        try { connection.destroy(); } catch {}
+        connection = null;
+        setTimeout(async () => {
+          if (!manualLeave && currentVC) {
+            await connect(currentVC);
+            if (mode247 && !isPlaying) {
+              await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
+            }
+          }
+        }, 3000);
+      }
+    });
+
+    // ── Destroyed handler ──
+    connection.on(VoiceConnectionStatus.Destroyed, async () => {
+      if (manualLeave) return;
+      console.log('Connection destroyed, coba rejoin...');
+      connection = null;
       setTimeout(async () => {
         if (!manualLeave && currentVC) {
           await connect(currentVC);
@@ -161,26 +188,24 @@ async function connect(vc) {
             await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
           }
         }
-      }, 3000);
-    }
-  });
+      }, 5000);
+    });
 
-  connection.on(VoiceConnectionStatus.Destroyed, async () => {
-    if (manualLeave) return;
-    console.log('Destroyed — coba rejoin...');
-    setTimeout(async () => {
-      if (!manualLeave && currentVC) {
-        try {
-          await connect(currentVC);
-          if (mode247 && !isPlaying) {
-            await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
-          }
-        } catch (err) {
-          console.error('Gagal rejoin:', err.message);
-        }
-      }
-    }, 5000);
-  });
+  } catch (err) {
+    console.error(`Gagal connect (percobaan ${retryCount + 1}):`, err.message);
+    try { connection?.destroy(); } catch {}
+    connection = null;
+
+    // Retry sampai 3x dengan jeda makin panjang
+    if (retryCount < 3 && !manualLeave) {
+      const delay = (retryCount + 1) * 5000; // 5s, 10s, 15s
+      console.log(`Retry connect dalam ${delay / 1000} detik...`);
+      await new Promise(r => setTimeout(r, delay));
+      return connect(vc, retryCount + 1);
+    }
+
+    throw new Error('Gagal connect ke voice channel setelah 3x percobaan');
+  }
 }
 
 // ─────────────────────────────────────────
@@ -206,7 +231,7 @@ async function playMusic(songObj) {
     player.play(resource);
     console.log(`Playing: ${songObj.title}`);
   } catch (err) {
-    console.error('Error playMusic:', err);
+    console.error('Error playMusic:', err.message);
     isPlaying = false;
     currentSong = null;
     if (queue.length > 0) {
@@ -284,8 +309,12 @@ client.on(Events.MessageCreate, async (message) => {
   // ── JOIN ──
   if (command === 'join') {
     if (!vc) return message.reply('Masuk voice dulu bro');
-    await connect(vc);
-    return message.reply('Join voice ✅');
+    try {
+      await connect(vc);
+      return message.reply('Join voice ✅');
+    } catch (err) {
+      return message.reply(`❌ Gagal join: ${err.message}`);
+    }
   }
 
   // ── PLAY ──
@@ -375,7 +404,6 @@ client.on(Events.MessageCreate, async (message) => {
         .setFooter({ text: 'Gunakan k!play <judul atau link> buat putar lagunya' });
 
       return loading.edit({ content: '', embeds: [embed] });
-
     } catch (err) {
       return loading.edit(`❌ Error: ${err.message}`);
     }
