@@ -1,4 +1,7 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+// Wajib load libsodium sebelum @discordjs/voice
+const sodium = require('libsodium-wrappers');
+
+const { Client, GatewayIntentBits, EmbedBuilder, Events } = require('discord.js');
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -6,8 +9,21 @@ const {
   AudioPlayerStatus,
   entersState,
   VoiceConnectionStatus,
+  NoSubscriberBehavior,
 } = require('@discordjs/voice');
 const playdl = require('play-dl');
+const http = require('http'); // built-in, ga perlu install
+
+// ─────────────────────────────────────────
+// HTTP SERVER — biar Railway ga sleep / restart bot
+// ─────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Bot lagi nyala!');
+}).listen(PORT, () => {
+  console.log(`HTTP server jalan di port ${PORT}`);
+});
 
 const client = new Client({
   intents: [
@@ -19,18 +35,23 @@ const client = new Client({
 });
 
 let connection;
-let player = createAudioPlayer();
+let player = createAudioPlayer({
+  behaviors: {
+    noSubscriber: NoSubscriberBehavior.Play,
+  }
+});
 let queue = [];
 let currentSong = null;
 let isPlaying = false;
 let mode247 = false;
-let manualLeave = false; // flag buat bedain leave manual vs disconnect paksa
+let manualLeave = false;
+let currentVC = null;
 
 const PREFIX = 'k!';
 const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk";
 
 // ─────────────────────────────────────────
-// HELPER: resolve input → YouTube URL + info
+// HELPER: resolve input → info lagu
 // ─────────────────────────────────────────
 async function resolveInput(input) {
   const type = await playdl.validate(input);
@@ -107,64 +128,50 @@ function formatDuration(sec) {
 }
 
 // ─────────────────────────────────────────
-// CONNECT - dengan reconnect loop agresif
+// CONNECT
 // ─────────────────────────────────────────
 async function connect(vc) {
   manualLeave = false;
+  currentVC = vc;
 
   connection = joinVoiceChannel({
     channelId: vc.id,
     guildId: vc.guild.id,
     adapterCreator: vc.guild.voiceAdapterCreator,
-    selfDeaf: true,
+    selfDeaf: false,
   });
 
   await entersState(connection, VoiceConnectionStatus.Ready, 20000);
   connection.subscribe(player);
 
-  // ── KUNCI UTAMA: jangan pernah keluar kecuali manualLeave = true ──
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
-    // Kalau memang disuruh keluar, biarkan
     if (manualLeave) return;
-
-    // Coba reconnect dulu (Discord kadang disconnect sebentar)
     try {
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5000),
       ]);
-      // Berhasil reconnect, lanjut
     } catch {
-      // Gagal reconnect otomatis → paksa rejoin ulang
-      console.log('Disconnect terdeteksi, rejoin ulang...');
-      if (!manualLeave && vc) {
-        try {
-          connection.destroy();
-        } catch {}
-        // Tunggu bentar lalu rejoin
-        setTimeout(async () => {
-          if (!manualLeave) {
-            await connect(vc);
-            // Kalau mode 247 aktif dan ga ada yang main, mulai lagi
-            if (mode247 && !isPlaying) {
-              await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
-            }
+      console.log('Disconnect — coba rejoin...');
+      try { connection.destroy(); } catch {}
+      setTimeout(async () => {
+        if (!manualLeave && currentVC) {
+          await connect(currentVC);
+          if (mode247 && !isPlaying) {
+            await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
           }
-        }, 3000);
-      }
+        }
+      }, 3000);
     }
   });
 
-  // Kalau tiba-tiba Destroyed dari luar (misal bot di-kick dari VC)
   connection.on(VoiceConnectionStatus.Destroyed, async () => {
     if (manualLeave) return;
-
-    // Bot di-kick / channel dihapus → coba rejoin
-    console.log('Connection destroyed, coba rejoin...');
+    console.log('Destroyed — coba rejoin...');
     setTimeout(async () => {
-      if (!manualLeave && vc) {
+      if (!manualLeave && currentVC) {
         try {
-          await connect(vc);
+          await connect(currentVC);
           if (mode247 && !isPlaying) {
             await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
           }
@@ -184,25 +191,39 @@ async function playMusic(songObj) {
     isPlaying = true;
     currentSong = songObj;
 
-    const source = await playdl.stream(songObj.url, { quality: 2 });
+    await sodium.ready;
+
+    const source = await playdl.stream(songObj.url, {
+      quality: 2,
+      discordPlayerCompatibility: true,
+    });
+
     const resource = createAudioResource(source.stream, {
       inputType: source.type,
+      inlineVolume: false,
     });
 
     player.play(resource);
+    console.log(`Playing: ${songObj.title}`);
   } catch (err) {
     console.error('Error playMusic:', err);
     isPlaying = false;
     currentSong = null;
+    if (queue.length > 0) {
+      setTimeout(() => playMusic(queue.shift()), 1000);
+    } else if (mode247) {
+      setTimeout(() => playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' }), 3000);
+    }
   }
 }
 
 // ─────────────────────────────────────────
-// IDLE → next queue / 24/7 loop
+// IDLE
 // ─────────────────────────────────────────
 player.on(AudioPlayerStatus.Idle, async () => {
   isPlaying = false;
   currentSong = null;
+  console.log('Player idle, queue:', queue.length);
   if (queue.length > 0) {
     await playMusic(queue.shift());
   } else if (mode247) {
@@ -214,7 +235,9 @@ player.on('error', (err) => {
   console.error('Player error:', err.message);
   isPlaying = false;
   currentSong = null;
-  if (mode247) {
+  if (queue.length > 0) {
+    setTimeout(() => playMusic(queue.shift()), 1000);
+  } else if (mode247) {
     setTimeout(() => playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' }), 3000);
   }
 });
@@ -222,15 +245,15 @@ player.on('error', (err) => {
 // ─────────────────────────────────────────
 // READY
 // ─────────────────────────────────────────
-client.once('ready', () => {
-  console.log(`Bot nyala: ${client.user.tag}`);
-  client.user.setActivity('k!help | 🎵 Music', { type: 2 });
+client.once(Events.ClientReady, (c) => {
+  console.log(`Bot nyala: ${c.user.tag}`);
+  c.user.setActivity('k!help | 🎵 Music', { type: 2 });
 });
 
 // ─────────────────────────────────────────
 // COMMANDS
 // ─────────────────────────────────────────
-client.on('messageCreate', async (message) => {
+client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (!message.content.startsWith(PREFIX)) return;
 
@@ -417,21 +440,22 @@ client.on('messageCreate', async (message) => {
       if (!isPlaying) await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
       return message.reply('24/7 ON 🔥 Bot ga akan keluar VC sampai `k!leave`');
     } else {
-      return message.reply('24/7 OFF 😴 Bot akan keluar kalau queue habis');
+      return message.reply('24/7 OFF 😴');
     }
   }
 
-  // ── LEAVE (satu-satunya cara keluarin bot) ──
+  // ── LEAVE ──
   if (command === 'leave') {
     if (!connection) return message.reply('Ga di voice bro');
-    manualLeave = true; // tandai ini intentional
+    manualLeave = true;
+    player.stop();
     connection.destroy();
     connection = null;
+    currentVC = null;
     queue = [];
     currentSong = null;
     isPlaying = false;
     mode247 = false;
-    player.stop();
     return message.reply('Leave 👋');
   }
 });
