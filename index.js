@@ -26,6 +26,12 @@ http.createServer((req, res) => {
   console.log(`HTTP server jalan di port ${PORT}`);
 });
 
+// ─────────────────────────────────────────
+// YOUTUBE API KEY — debug log buat cek
+// ─────────────────────────────────────────
+const YT_API_KEY = process.env.YOUTUBE_API_KEY;
+console.log('YT API KEY loaded:', YT_API_KEY ? '✅ Ada' : '❌ KOSONG - cek Railway Variables!');
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -49,33 +55,45 @@ let currentGuildId = null;
 
 const PREFIX = 'k!';
 const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk";
-const YT_API_KEY = process.env.YOUTUBE_API_KEY;
 
 // ─────────────────────────────────────────
-// YOUTUBE API SEARCH — cepet, langsung hit API
+// YOUTUBE API SEARCH
 // ─────────────────────────────────────────
 async function ytApiSearch(query, maxResults = 1) {
   return new Promise((resolve, reject) => {
+    if (!YT_API_KEY) {
+      return reject(new Error('YOUTUBE_API_KEY kosong, cek Railway Variables!'));
+    }
     const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${maxResults}&key=${YT_API_KEY}`;
+    console.log(`[YT Search] Query: "${query}"`);
     https.get(url, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
+          console.log(`[YT Search] Status: ${res.statusCode}, Items: ${json.items?.length || 0}`);
+          if (json.error) {
+            console.error('[YT Search] API Error:', json.error.message);
+            return reject(new Error(json.error.message));
+          }
           if (!json.items || json.items.length === 0) return resolve([]);
           const results = json.items.map(item => ({
             title: item.snippet.title,
             url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
             thumbnail: item.snippet.thumbnails?.medium?.url || null,
-            duration: '??:??', // API search ga return durasi, tapi cukup buat play
+            duration: '??:??',
           }));
           resolve(results);
         } catch (e) {
+          console.error('[YT Search] Parse error:', e.message);
           reject(e);
         }
       });
-    }).on('error', reject);
+    }).on('error', (e) => {
+      console.error('[YT Search] Request error:', e.message);
+      reject(e);
+    });
   });
 }
 
@@ -84,8 +102,8 @@ async function ytApiSearch(query, maxResults = 1) {
 // ─────────────────────────────────────────
 async function resolveInput(input) {
   const type = await playdl.validate(input);
+  console.log(`[Resolve] Input: "${input}", Type: ${type}`);
 
-  // ── YouTube link langsung ──
   if (type === 'yt_video') {
     const info = await playdl.video_info(input);
     return [{
@@ -96,7 +114,6 @@ async function resolveInput(input) {
     }];
   }
 
-  // ── YouTube playlist ──
   if (type === 'yt_playlist') {
     const playlist = await playdl.playlist_info(input, { incomplete: true });
     const videos = await playlist.all_videos();
@@ -108,7 +125,6 @@ async function resolveInput(input) {
     }));
   }
 
-  // ── Spotify track ──
   if (type === 'sp_track') {
     const spData = await playdl.spotify(input);
     const query = `${spData.name} ${spData.artists.map(a => a.name).join(' ')}`;
@@ -117,7 +133,6 @@ async function resolveInput(input) {
     return results;
   }
 
-  // ── Spotify album / playlist ──
   if (type === 'sp_album' || type === 'sp_playlist') {
     const spData = await playdl.spotify(input);
     const tracks = spData.fetched_tracks?.get('1') || [];
@@ -130,7 +145,7 @@ async function resolveInput(input) {
     return resolved;
   }
 
-  // ── Nama lagu / search query — pake YouTube API ──
+  // Nama lagu / search query
   const results = await ytApiSearch(input, 1);
   if (!results.length) throw new Error('Lagu ga ketemu bro');
   return results;
