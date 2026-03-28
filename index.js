@@ -9,6 +9,7 @@ const {
   entersState,
   VoiceConnectionStatus,
   NoSubscriberBehavior,
+  getVoiceConnection,
 } = require('@discordjs/voice');
 const playdl = require('play-dl');
 const http = require('http');
@@ -33,19 +34,28 @@ const client = new Client({
   ]
 });
 
-let connection;
-let player = createAudioPlayer({
+const player = createAudioPlayer({
   behaviors: { noSubscriber: NoSubscriberBehavior.Play }
 });
+
 let queue = [];
 let currentSong = null;
 let isPlaying = false;
 let mode247 = false;
 let manualLeave = false;
 let currentVC = null;
+let currentGuildId = null;
 
 const PREFIX = 'k!';
 const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk";
+
+// ─────────────────────────────────────────
+// HELPER: ambil koneksi aktif
+// ─────────────────────────────────────────
+function getConn() {
+  if (!currentGuildId) return null;
+  return getVoiceConnection(currentGuildId);
+}
 
 // ─────────────────────────────────────────
 // HELPER: resolve input
@@ -106,7 +116,6 @@ async function resolveInput(input) {
     return resolved;
   }
 
-  // Nama lagu / search query
   const results = await playdl.search(input, { source: { youtube: 'video' }, limit: 1 });
   if (!results.length) throw new Error('Lagu ga ketemu bro');
   return [{
@@ -125,87 +134,71 @@ function formatDuration(sec) {
 }
 
 // ─────────────────────────────────────────
-// CONNECT — timeout lebih panjang + retry
+// CONNECT — simplified, no retry loop
 // ─────────────────────────────────────────
-async function connect(vc, retryCount = 0) {
+async function connect(vc) {
   manualLeave = false;
   currentVC = vc;
+  currentGuildId = vc.guild.id;
+
+  // Kalau udah ada koneksi di guild ini, reuse aja
+  const existing = getVoiceConnection(vc.guild.id);
+  if (existing && existing.state.status === VoiceConnectionStatus.Ready) {
+    console.log('Reuse existing connection');
+    existing.subscribe(player);
+    return;
+  }
+
+  // Destroy dulu kalau ada koneksi lama yang ga ready
+  if (existing) {
+    try { existing.destroy(); } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  const conn = joinVoiceChannel({
+    channelId: vc.id,
+    guildId: vc.guild.id,
+    adapterCreator: vc.guild.voiceAdapterCreator,
+    selfDeaf: true,
+  });
 
   try {
-    // Kalau ada koneksi lama, destroy dulu
-    if (connection) {
-      try { connection.destroy(); } catch {}
-      connection = null;
-      await new Promise(r => setTimeout(r, 1000)); // tunggu bentar
-    }
+    await entersState(conn, VoiceConnectionStatus.Ready, 30_000);
+  } catch (err) {
+    conn.destroy();
+    throw new Error('Gagal connect ke voice channel, coba lagi bro');
+  }
 
-    connection = joinVoiceChannel({
-      channelId: vc.id,
-      guildId: vc.guild.id,
-      adapterCreator: vc.guild.voiceAdapterCreator,
-      selfDeaf: false,
-    });
+  conn.subscribe(player);
+  console.log(`Connected ke: ${vc.name}`);
 
-    // Timeout diperpanjang jadi 60 detik buat Railway
-    await entersState(connection, VoiceConnectionStatus.Ready, 60_000);
-    connection.subscribe(player);
-    console.log(`Connected ke VC: ${vc.name}`);
-
-    // ── Disconnect handler ──
-    connection.on(VoiceConnectionStatus.Disconnected, async () => {
-      if (manualLeave) return;
-      console.log('Disconnected dari VC, coba reconnect...');
-      try {
-        await Promise.race([
-          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-        ]);
-        console.log('Reconnect berhasil');
-      } catch {
-        // Gagal reconnect otomatis, paksa rejoin
-        try { connection.destroy(); } catch {}
-        connection = null;
+  // Handler disconnect — cukup reconnect sekali, ga loop
+  conn.on(VoiceConnectionStatus.Disconnected, async () => {
+    if (manualLeave) return;
+    console.log('Disconnected, coba reconnect...');
+    try {
+      await Promise.race([
+        entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
+      ]);
+      console.log('Reconnect berhasil');
+    } catch {
+      // Gagal reconnect, coba join ulang setelah 5 detik
+      try { conn.destroy(); } catch {}
+      if (!manualLeave && currentVC) {
         setTimeout(async () => {
-          if (!manualLeave && currentVC) {
+          try {
             await connect(currentVC);
             if (mode247 && !isPlaying) {
               await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
             }
+          } catch (e) {
+            console.error('Gagal rejoin:', e.message);
           }
-        }, 3000);
+        }, 5000);
       }
-    });
-
-    // ── Destroyed handler ──
-    connection.on(VoiceConnectionStatus.Destroyed, async () => {
-      if (manualLeave) return;
-      console.log('Connection destroyed, coba rejoin...');
-      connection = null;
-      setTimeout(async () => {
-        if (!manualLeave && currentVC) {
-          await connect(currentVC);
-          if (mode247 && !isPlaying) {
-            await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
-          }
-        }
-      }, 5000);
-    });
-
-  } catch (err) {
-    console.error(`Gagal connect (percobaan ${retryCount + 1}):`, err.message);
-    try { connection?.destroy(); } catch {}
-    connection = null;
-
-    // Retry sampai 3x dengan jeda makin panjang
-    if (retryCount < 3 && !manualLeave) {
-      const delay = (retryCount + 1) * 5000; // 5s, 10s, 15s
-      console.log(`Retry connect dalam ${delay / 1000} detik...`);
-      await new Promise(r => setTimeout(r, delay));
-      return connect(vc, retryCount + 1);
     }
-
-    throw new Error('Gagal connect ke voice channel setelah 3x percobaan');
-  }
+  });
 }
 
 // ─────────────────────────────────────────
@@ -248,7 +241,7 @@ async function playMusic(songObj) {
 player.on(AudioPlayerStatus.Idle, async () => {
   isPlaying = false;
   currentSong = null;
-  console.log('Player idle, queue:', queue.length);
+  console.log('Idle — queue:', queue.length, '| 247:', mode247);
   if (queue.length > 0) {
     await playMusic(queue.shift());
   } else if (mode247) {
@@ -313,7 +306,7 @@ client.on(Events.MessageCreate, async (message) => {
       await connect(vc);
       return message.reply('Join voice ✅');
     } catch (err) {
-      return message.reply(`❌ Gagal join: ${err.message}`);
+      return message.reply(`❌ ${err.message}`);
     }
   }
 
@@ -327,7 +320,10 @@ client.on(Events.MessageCreate, async (message) => {
 
     try {
       const songs = await resolveInput(input);
-      if (!connection) await connect(vc);
+      const conn = getConn();
+      if (!conn || conn.state.status !== VoiceConnectionStatus.Ready) {
+        await connect(vc);
+      }
 
       if (songs.length === 1) {
         const song = { ...songs[0], requestedBy: message.author.username };
@@ -464,8 +460,13 @@ client.on(Events.MessageCreate, async (message) => {
     if (!vc) return message.reply('Masuk voice dulu bro');
     mode247 = !mode247;
     if (mode247) {
-      if (!connection) await connect(vc);
-      if (!isPlaying) await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
+      const conn = getConn();
+      if (!conn || conn.state.status !== VoiceConnectionStatus.Ready) {
+        await connect(vc);
+      }
+      if (!isPlaying) {
+        await playMusic({ title: 'lofi hip hop radio', url: DEFAULT_URL, duration: '∞' });
+      }
       return message.reply('24/7 ON 🔥 Bot ga akan keluar VC sampai `k!leave`');
     } else {
       return message.reply('24/7 OFF 😴');
@@ -474,12 +475,13 @@ client.on(Events.MessageCreate, async (message) => {
 
   // ── LEAVE ──
   if (command === 'leave') {
-    if (!connection) return message.reply('Ga di voice bro');
+    const conn = getConn();
+    if (!conn) return message.reply('Ga di voice bro');
     manualLeave = true;
     player.stop();
-    connection.destroy();
-    connection = null;
+    conn.destroy();
     currentVC = null;
+    currentGuildId = null;
     queue = [];
     currentSong = null;
     isPlaying = false;
