@@ -13,6 +13,7 @@ const {
 } = require('@discordjs/voice');
 const playdl = require('play-dl');
 const http = require('http');
+const https = require('https');
 
 // ─────────────────────────────────────────
 // HTTP SERVER biar Railway ga sleep
@@ -48,13 +49,34 @@ let currentGuildId = null;
 
 const PREFIX = 'k!';
 const DEFAULT_URL = "https://www.youtube.com/watch?v=jfKfPfyJRdk";
+const YT_API_KEY = process.env.YOUTUBE_API_KEY;
 
 // ─────────────────────────────────────────
-// HELPER: ambil koneksi aktif
+// YOUTUBE API SEARCH — cepet, langsung hit API
 // ─────────────────────────────────────────
-function getConn() {
-  if (!currentGuildId) return null;
-  return getVoiceConnection(currentGuildId);
+async function ytApiSearch(query, maxResults = 1) {
+  return new Promise((resolve, reject) => {
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=${maxResults}&key=${YT_API_KEY}`;
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (!json.items || json.items.length === 0) return resolve([]);
+          const results = json.items.map(item => ({
+            title: item.snippet.title,
+            url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+            thumbnail: item.snippet.thumbnails?.medium?.url || null,
+            duration: '??:??', // API search ga return durasi, tapi cukup buat play
+          }));
+          resolve(results);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }).on('error', reject);
+  });
 }
 
 // ─────────────────────────────────────────
@@ -63,6 +85,7 @@ function getConn() {
 async function resolveInput(input) {
   const type = await playdl.validate(input);
 
+  // ── YouTube link langsung ──
   if (type === 'yt_video') {
     const info = await playdl.video_info(input);
     return [{
@@ -73,6 +96,7 @@ async function resolveInput(input) {
     }];
   }
 
+  // ── YouTube playlist ──
   if (type === 'yt_playlist') {
     const playlist = await playdl.playlist_info(input, { incomplete: true });
     const videos = await playlist.all_videos();
@@ -84,46 +108,32 @@ async function resolveInput(input) {
     }));
   }
 
+  // ── Spotify track ──
   if (type === 'sp_track') {
     const spData = await playdl.spotify(input);
     const query = `${spData.name} ${spData.artists.map(a => a.name).join(' ')}`;
-    const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
-    if (!results.length) throw new Error('Lagu Spotify ga ketemu di YouTube');
-    return [{
-      title: results[0].title,
-      url: results[0].url,
-      thumbnail: results[0].thumbnails?.[0]?.url || null,
-      duration: formatDuration(results[0].durationInSec),
-    }];
+    const results = await ytApiSearch(query, 1);
+    if (!results.length) throw new Error('Lagu Spotify ga ketemu');
+    return results;
   }
 
+  // ── Spotify album / playlist ──
   if (type === 'sp_album' || type === 'sp_playlist') {
     const spData = await playdl.spotify(input);
     const tracks = spData.fetched_tracks?.get('1') || [];
     const resolved = [];
     for (const track of tracks.slice(0, 50)) {
       const query = `${track.name} ${track.artists.map(a => a.name).join(' ')}`;
-      const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
-      if (results.length) {
-        resolved.push({
-          title: results[0].title,
-          url: results[0].url,
-          thumbnail: results[0].thumbnails?.[0]?.url || null,
-          duration: formatDuration(results[0].durationInSec),
-        });
-      }
+      const results = await ytApiSearch(query, 1);
+      if (results.length) resolved.push(results[0]);
     }
     return resolved;
   }
 
-  const results = await playdl.search(input, { source: { youtube: 'video' }, limit: 1 });
+  // ── Nama lagu / search query — pake YouTube API ──
+  const results = await ytApiSearch(input, 1);
   if (!results.length) throw new Error('Lagu ga ketemu bro');
-  return [{
-    title: results[0].title,
-    url: results[0].url,
-    thumbnail: results[0].thumbnails?.[0]?.url || null,
-    duration: formatDuration(results[0].durationInSec),
-  }];
+  return results;
 }
 
 function formatDuration(sec) {
@@ -134,22 +144,27 @@ function formatDuration(sec) {
 }
 
 // ─────────────────────────────────────────
-// CONNECT — simplified, no retry loop
+// HELPER: ambil koneksi aktif
+// ─────────────────────────────────────────
+function getConn() {
+  if (!currentGuildId) return null;
+  return getVoiceConnection(currentGuildId);
+}
+
+// ─────────────────────────────────────────
+// CONNECT
 // ─────────────────────────────────────────
 async function connect(vc) {
   manualLeave = false;
   currentVC = vc;
   currentGuildId = vc.guild.id;
 
-  // Kalau udah ada koneksi di guild ini, reuse aja
   const existing = getVoiceConnection(vc.guild.id);
   if (existing && existing.state.status === VoiceConnectionStatus.Ready) {
-    console.log('Reuse existing connection');
     existing.subscribe(player);
     return;
   }
 
-  // Destroy dulu kalau ada koneksi lama yang ga ready
   if (existing) {
     try { existing.destroy(); } catch {}
     await new Promise(r => setTimeout(r, 500));
@@ -172,18 +187,14 @@ async function connect(vc) {
   conn.subscribe(player);
   console.log(`Connected ke: ${vc.name}`);
 
-  // Handler disconnect — cukup reconnect sekali, ga loop
   conn.on(VoiceConnectionStatus.Disconnected, async () => {
     if (manualLeave) return;
-    console.log('Disconnected, coba reconnect...');
     try {
       await Promise.race([
         entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
         entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
       ]);
-      console.log('Reconnect berhasil');
     } catch {
-      // Gagal reconnect, coba join ulang setelah 5 detik
       try { conn.destroy(); } catch {}
       if (!manualLeave && currentVC) {
         setTimeout(async () => {
@@ -386,7 +397,7 @@ client.on(Events.MessageCreate, async (message) => {
     const loading = await message.reply('🔍 Nyari lagu...');
 
     try {
-      const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 5 });
+      const results = await ytApiSearch(query, 5);
       if (!results.length) return loading.edit('❌ Lagu ga ketemu bro');
 
       const embed = new EmbedBuilder()
@@ -394,7 +405,7 @@ client.on(Events.MessageCreate, async (message) => {
         .setTitle(`🔍 Hasil pencarian: "${query}"`)
         .setDescription(
           results.map((v, i) =>
-            `**${i + 1}.** [${v.title}](${v.url}) — \`${formatDuration(v.durationInSec)}\``
+            `**${i + 1}.** [${v.title}](${v.url})`
           ).join('\n')
         )
         .setFooter({ text: 'Gunakan k!play <judul atau link> buat putar lagunya' });
